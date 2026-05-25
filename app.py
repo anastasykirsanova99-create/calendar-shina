@@ -20,7 +20,7 @@ credentials = service_account.Credentials.from_service_account_info(
 
 service = build('calendar', 'v3', credentials=credentials)
 
-CALENDAR_ID = '0114e94607dcd860a84c1fe451c94861d283136be270a76f1e3373108dca2fec@group.calendar.google.com'
+CALENDAR_ID = '65eb87c37a4593bf4ee2d8f63178afbb560bdbdf45e9d146447a4139f3cc681a@group.calendar.google.com'
 
 TIMEZONE = 'Europe/Kyiv'
 KYIV_TZ = ZoneInfo(TIMEZONE)
