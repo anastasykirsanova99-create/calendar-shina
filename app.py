@@ -30,50 +30,34 @@ WORK_END = 18
 SLOT_DURATION = 1
 
 
-# ---------------- DATE NORMALIZATION ----------------
-
-def normalize_date(date_str):
-    today = datetime.now(KYIV_TZ).date()
-
-    if not date_str:
-        return today
-
-    date_str = date_str.lower().strip()
-
-    if "завтра" in date_str:
-        return today + timedelta(days=1)
-
-    if "післязавтра" in date_str:
-        return today + timedelta(days=2)
-
-    match = re.search(r"через\s*(\d+)", date_str)
-    if match:
-        return today + timedelta(days=int(match.group(1)))
-
-    try:
-        if len(date_str) == 5:  # 26.05
-            date_str = f"{date_str}.2026"
-
-        return datetime.strptime(date_str, "%d.%m.%Y").date()
-    except:
-        return today
-
-
-# ---------------- TIME NORMALIZATION ----------------
+# ---------------- TIME FIX (CRITICAL PATCH) ----------------
 
 def normalize_time(time_str):
+    """
+    Принимает:
+    - "14:00-15:00"
+    - "14:00"
+    - "14"
+    - "в 3"
+    """
+
     if not time_str:
         return "09:00"
 
-    t = time_str.lower().strip()
+    t = str(time_str).lower().strip()
 
-    # "в 3", "3"
-    match = re.search(r"(\d{1,2})", t)
+    # 🔥 FIX: диапазон времени → берем старт
+    if "-" in t:
+        t = t.split("-")[0].strip()
+
+    # 14:00
+    match = re.search(r"(\d{1,2}):?(\d{2})?", t)
     if match:
         hour = int(match.group(1))
 
-        if "вечора" in t or "дня" in t or hour < 8:
-            if hour != 0:
+        # простая логика "день/вечер"
+        if "вечора" in t or "дня" in t or hour <= 6:
+            if hour != 0 and hour < 12:
                 hour += 12
 
         return f"{hour:02d}:00"
@@ -85,6 +69,35 @@ def normalize_time(time_str):
         return "13:00"
 
     return "09:00"
+
+
+# ---------------- DATE FIX ----------------
+
+def normalize_date(date_str):
+    today = datetime.now(KYIV_TZ).date()
+
+    if not date_str:
+        return today
+
+    d = str(date_str).lower().strip()
+
+    if "завтра" in d:
+        return today + timedelta(days=1)
+
+    if "післязавтра" in d:
+        return today + timedelta(days=2)
+
+    match = re.search(r"через\s*(\d+)", d)
+    if match:
+        return today + timedelta(days=int(match.group(1)))
+
+    try:
+        if len(d) == 5:
+            d = f"{d}.2026"
+
+        return datetime.strptime(d, "%d.%m.%Y").date()
+    except:
+        return today
 
 
 # ---------------- CALENDAR HELPERS ----------------
@@ -101,10 +114,6 @@ def format_time(dt):
     return dt.strftime("%H:%M")
 
 
-def slot_overlaps(a_start, a_end, b_start, b_end):
-    return a_start < b_end and a_end > b_start
-
-
 def get_busy(start_dt, end_dt):
     body = {
         "timeMin": start_dt.astimezone(timezone.utc).isoformat(),
@@ -117,34 +126,8 @@ def get_busy(start_dt, end_dt):
     return result["calendars"][CALENDAR_ID].get("busy", [])
 
 
-# ---------------- SLOT GENERATION ----------------
-
-def get_three_slots(date_obj):
-    day_start = datetime.combine(date_obj, datetime.min.time(), tzinfo=KYIV_TZ)
-    day_end = day_start + timedelta(days=1)
-
-    busy = get_busy(day_start, day_end)
-
-    busy_intervals = [
-        (parse_google_dt(b["start"]), parse_google_dt(b["end"]))
-        for b in busy
-    ]
-
-    slots = []
-
-    for hour in range(WORK_START, WORK_END):
-        start = datetime(date_obj.year, date_obj.month, date_obj.day, hour, 0, tzinfo=KYIV_TZ)
-        end = start + timedelta(hours=SLOT_DURATION)
-
-        if any(slot_overlaps(start, end, b1, b2) for b1, b2 in busy_intervals):
-            continue
-
-        slots.append(f"{format_time(start)}-{format_time(end)}")
-
-        if len(slots) == 3:
-            break
-
-    return slots
+def overlaps(a1, a2, b1, b2):
+    return a1 < b2 and a2 > b1
 
 
 # ---------------- CREATE EVENT ----------------
@@ -156,7 +139,7 @@ def create_event():
 
         name = data.get("name")
         phone = data.get("phone")
-        service = data.get("service")
+        service_name = data.get("service")
 
         date_obj = normalize_date(data.get("date"))
         time_str = normalize_time(data.get("time"))
@@ -168,12 +151,14 @@ def create_event():
 
         end_dt = start_dt + timedelta(hours=SLOT_DURATION)
 
+        # рабочее время
         if start_dt.hour < WORK_START or end_dt.hour > WORK_END:
             return jsonify({
                 "success": False,
                 "error": "outside_working_hours"
             }), 409
 
+        # проверка занятости
         busy = get_busy(start_dt, end_dt)
 
         if busy:
@@ -182,14 +167,24 @@ def create_event():
                 "error": "slot_busy"
             }), 409
 
+        # событие
         event = {
-            "summary": f"{service} - {name}",
+            "summary": f"{service_name} - {name}",
             "description": f"Phone: {phone}",
-            "start": {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Kyiv"},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Kyiv"},
+            "start": {
+                "dateTime": start_dt.isoformat(),
+                "timeZone": "Europe/Kyiv"
+            },
+            "end": {
+                "dateTime": end_dt.isoformat(),
+                "timeZone": "Europe/Kyiv"
+            }
         }
 
-        service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
+        service.events().insert(
+            calendarId=CALENDAR_ID,
+            body=event
+        ).execute()
 
         return jsonify({
             "success": True,
@@ -211,13 +206,35 @@ def create_event():
 def availability():
     try:
         data = request.json or {}
-
         date_obj = normalize_date(data.get("date"))
-        slots = get_three_slots(date_obj)
+
+        day_start = datetime.combine(date_obj, datetime.min.time(), tzinfo=KYIV_TZ)
+        day_end = day_start + timedelta(days=1)
+
+        busy = get_busy(day_start, day_end)
+
+        busy_intervals = [
+            (parse_google_dt(b["start"]), parse_google_dt(b["end"]))
+            for b in busy
+        ]
+
+        slots = []
+
+        for hour in range(WORK_START, WORK_END):
+            start = datetime(date_obj.year, date_obj.month, date_obj.day, hour, 0, tzinfo=KYIV_TZ)
+            end = start + timedelta(hours=SLOT_DURATION)
+
+            if any(overlaps(start, end, b1, b2) for b1, b2 in busy_intervals):
+                continue
+
+            slots.append(f"{format_time(start)}-{format_time(end)}")
+
+            if len(slots) == 3:
+                break
 
         return jsonify({
-            "current_date": format_date(datetime.now(KYIV_TZ)),
-            "date": format_date(datetime.combine(date_obj, datetime.min.time())),
+            "success": True,
+            "date": format_date(day_start),
             "slots": slots
         })
 
