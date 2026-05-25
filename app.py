@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import os
 import traceback
+import re
 
 app = Flask(__name__)
 
@@ -22,15 +23,71 @@ service = build('calendar', 'v3', credentials=credentials)
 
 CALENDAR_ID = '65eb87c37a4593bf4ee2d8f63178afbb560bdbdf45e9d146447a4139f3cc681a@group.calendar.google.com'
 
-TIMEZONE = 'Europe/Kyiv'
-KYIV_TZ = ZoneInfo(TIMEZONE)
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-WORK_START_HOUR = 9
-WORK_END_HOUR = 18
-SLOT_DURATION_HOURS = 1
+WORK_START = 9
+WORK_END = 18
+SLOT_DURATION = 1
 
 
-# ---------------- UTILS ----------------
+# ---------------- DATE NORMALIZATION ----------------
+
+def normalize_date(date_str):
+    today = datetime.now(KYIV_TZ).date()
+
+    if not date_str:
+        return today
+
+    date_str = date_str.lower().strip()
+
+    if "завтра" in date_str:
+        return today + timedelta(days=1)
+
+    if "післязавтра" in date_str:
+        return today + timedelta(days=2)
+
+    match = re.search(r"через\s*(\d+)", date_str)
+    if match:
+        return today + timedelta(days=int(match.group(1)))
+
+    try:
+        if len(date_str) == 5:  # 26.05
+            date_str = f"{date_str}.2026"
+
+        return datetime.strptime(date_str, "%d.%m.%Y").date()
+    except:
+        return today
+
+
+# ---------------- TIME NORMALIZATION ----------------
+
+def normalize_time(time_str):
+    if not time_str:
+        return "09:00"
+
+    t = time_str.lower().strip()
+
+    # "в 3", "3"
+    match = re.search(r"(\d{1,2})", t)
+    if match:
+        hour = int(match.group(1))
+
+        if "вечора" in t or "дня" in t or hour < 8:
+            if hour != 0:
+                hour += 12
+
+        return f"{hour:02d}:00"
+
+    if "пів на другу" in t:
+        return "13:30"
+
+    if "час дня" in t:
+        return "13:00"
+
+    return "09:00"
+
+
+# ---------------- CALENDAR HELPERS ----------------
 
 def parse_google_dt(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(KYIV_TZ)
@@ -44,17 +101,15 @@ def format_time(dt):
     return dt.strftime("%H:%M")
 
 
-def slot_overlaps(slot_start, slot_end, busy_start, busy_end):
-    return slot_start < busy_end and slot_end > busy_start
+def slot_overlaps(a_start, a_end, b_start, b_end):
+    return a_start < b_end and a_end > b_start
 
 
-# ---------------- GOOGLE BUSY ----------------
-
-def get_busy_slots(start_dt, end_dt):
+def get_busy(start_dt, end_dt):
     body = {
         "timeMin": start_dt.astimezone(timezone.utc).isoformat(),
         "timeMax": end_dt.astimezone(timezone.utc).isoformat(),
-        "timeZone": TIMEZONE,
+        "timeZone": "Europe/Kyiv",
         "items": [{"id": CALENDAR_ID}]
     }
 
@@ -62,50 +117,34 @@ def get_busy_slots(start_dt, end_dt):
     return result["calendars"][CALENDAR_ID].get("busy", [])
 
 
-# ---------------- SLOT GENERATION (UPDATED) ----------------
+# ---------------- SLOT GENERATION ----------------
 
-def get_three_slots_for_date(date_str):
-    """
-    Возвращает 3 свободных слота в формате:
-    11:00-12:00
-    """
-
-    day = datetime.strptime(date_str, "%d.%m.%Y").date()
-
-    day_start = datetime.combine(day, datetime.min.time(), tzinfo=KYIV_TZ)
+def get_three_slots(date_obj):
+    day_start = datetime.combine(date_obj, datetime.min.time(), tzinfo=KYIV_TZ)
     day_end = day_start + timedelta(days=1)
 
-    busy = get_busy_slots(day_start, day_end)
+    busy = get_busy(day_start, day_end)
 
-    busy_intervals = []
-    for b in busy:
-        busy_intervals.append((
-            parse_google_dt(b["start"]),
-            parse_google_dt(b["end"])
-        ))
+    busy_intervals = [
+        (parse_google_dt(b["start"]), parse_google_dt(b["end"]))
+        for b in busy
+    ]
 
-    free_slots = []
+    slots = []
 
-    for hour in range(WORK_START_HOUR, WORK_END_HOUR):
-        slot_start = datetime(day.year, day.month, day.day, hour, 0, tzinfo=KYIV_TZ)
-        slot_end = slot_start + timedelta(hours=SLOT_DURATION_HOURS)
+    for hour in range(WORK_START, WORK_END):
+        start = datetime(date_obj.year, date_obj.month, date_obj.day, hour, 0, tzinfo=KYIV_TZ)
+        end = start + timedelta(hours=SLOT_DURATION)
 
-        is_busy = False
+        if any(slot_overlaps(start, end, b1, b2) for b1, b2 in busy_intervals):
+            continue
 
-        for b_start, b_end in busy_intervals:
-            if slot_overlaps(slot_start, slot_end, b_start, b_end):
-                is_busy = True
-                break
+        slots.append(f"{format_time(start)}-{format_time(end)}")
 
-        if not is_busy:
-            free_slots.append(
-                f"{format_time(slot_start)}-{format_time(slot_end)}"
-            )
-
-        if len(free_slots) == 3:
+        if len(slots) == 3:
             break
 
-    return free_slots
+    return slots
 
 
 # ---------------- CREATE EVENT ----------------
@@ -115,56 +154,47 @@ def create_event():
     try:
         data = request.json
 
-        name = data.get('name')
-        phone = data.get('phone')
-        service_name = data.get('service')
-        date = data.get('date')
-        time = data.get('time')
+        name = data.get("name")
+        phone = data.get("phone")
+        service = data.get("service")
+
+        date_obj = normalize_date(data.get("date"))
+        time_str = normalize_time(data.get("time"))
 
         start_dt = datetime.strptime(
-            f"{date} {time}",
+            f"{date_obj.strftime('%d.%m.%Y')} {time_str}",
             "%d.%m.%Y %H:%M"
         ).replace(tzinfo=KYIV_TZ)
 
-        end_dt = start_dt + timedelta(hours=SLOT_DURATION_HOURS)
+        end_dt = start_dt + timedelta(hours=SLOT_DURATION)
 
-        if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
+        if start_dt.hour < WORK_START or end_dt.hour > WORK_END:
             return jsonify({
                 "success": False,
-                "error": "outside_working_hours",
-                "working_hours": "09:00-18:00"
+                "error": "outside_working_hours"
             }), 409
 
-        busy = get_busy_slots(start_dt, end_dt)
+        busy = get_busy(start_dt, end_dt)
 
-        if len(busy) > 0:
+        if busy:
             return jsonify({
                 "success": False,
                 "error": "slot_busy"
             }), 409
 
         event = {
-            'summary': f'{service_name} - {name}',
-            'description': f'Телефон: {phone}',
-            'start': {
-                'dateTime': start_dt.isoformat(),
-                'timeZone': TIMEZONE,
-            },
-            'end': {
-                'dateTime': end_dt.isoformat(),
-                'timeZone': TIMEZONE,
-            },
+            "summary": f"{service} - {name}",
+            "description": f"Phone: {phone}",
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": "Europe/Kyiv"},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": "Europe/Kyiv"},
         }
 
-        service.events().insert(
-            calendarId=CALENDAR_ID,
-            body=event
-        ).execute()
+        service.events().insert(calendarId=CALENDAR_ID, body=event).execute()
 
         return jsonify({
             "success": True,
-            "date": date,
-            "time": time
+            "date": format_date(start_dt),
+            "time": f"{format_time(start_dt)}-{format_time(end_dt)}"
         })
 
     except Exception as e:
@@ -177,25 +207,26 @@ def create_event():
 
 # ---------------- AVAILABILITY ----------------
 
-@app.route('/availability', methods=['GET'])
+@app.route('/availability', methods=['POST'])
 def availability():
     try:
-        current_date = datetime.now(KYIV_TZ).strftime("%d.%m.%Y")
+        data = request.json or {}
 
-        slots = get_three_slots_for_date(current_date)
+        date_obj = normalize_date(data.get("date"))
+        slots = get_three_slots(date_obj)
 
         return jsonify({
-            "current_date": current_date,
+            "current_date": format_date(datetime.now(KYIV_TZ)),
+            "date": format_date(datetime.combine(date_obj, datetime.min.time())),
             "slots": slots
         })
 
     except Exception as e:
-        print(traceback.format_exc())
         return jsonify({
             "success": False,
             "error": str(e)
         }), 500
 
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000)
