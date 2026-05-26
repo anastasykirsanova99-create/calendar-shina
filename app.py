@@ -139,16 +139,89 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
                 end_time = format_time(slot_end)
                 slot_range = f"{start_time}-{end_time}"
 
-                suggested_free_slots.append(
-                    f"{date_key} {start_time}"
-                )
-
+                suggested_free_slots.append(f"{date_key} {start_time}")
                 free_slots_by_date.setdefault(date_key, []).append(slot_range)
 
     if limit:
         suggested_free_slots = suggested_free_slots[:limit]
 
     return busy_by_date, suggested_free_slots, free_slots_by_date
+
+
+@app.route('/availability', methods=['GET'])
+def availability():
+    try:
+        current_now = datetime.now(KYIV_TZ)
+
+        busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
+
+        response_data = {
+            "success": True,
+            "current_date": current_now.strftime("%d.%m.%Y"),
+            "working_hours": "09:00-18:00",
+            "slot_duration_minutes": 60,
+            "has_busy_slots": len(busy_by_date) > 0,
+            "busy_by_date": busy_by_date,
+            "suggested_free_slots": suggested_free_slots,
+            "free_slots_by_date": free_slots_by_date
+        }
+
+        return app.response_class(
+            response=json.dumps(response_data, ensure_ascii=False),
+            mimetype='application/json'
+        )
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+
+@app.route('/availability-by-date', methods=['GET'])
+def availability_by_date():
+    try:
+        requested_date = request.args.get("date")
+
+        if not requested_date:
+            return jsonify({
+                "success": False,
+                "error": "date_required",
+                "message": "Потрібно передати дату у форматі dd.mm.yyyy"
+            }), 400
+
+        current_now = datetime.now(KYIV_TZ)
+
+        busy_by_date, _, free_slots_by_date = generate_free_slots()
+
+        free_slots = free_slots_by_date.get(requested_date, [])
+
+        response_data = {
+            "success": True,
+            "current_date": current_now.strftime("%d.%m.%Y"),
+            "date": requested_date,
+            "available": len(free_slots) > 0,
+            "free_slots": free_slots[:3],
+            "busy_slots": busy_by_date.get(requested_date, []),
+            "message": (
+                "Є вільні слоти"
+                if len(free_slots) > 0
+                else "На цю дату вільного часу немає"
+            )
+        }
+
+        return app.response_class(
+            response=json.dumps(response_data, ensure_ascii=False),
+            mimetype='application/json'
+        )
+
+    except Exception as e:
+        print(traceback.format_exc())
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 
 @app.route('/create-event', methods=['POST'])
@@ -172,28 +245,20 @@ def create_event():
         end_dt = start_dt + timedelta(hours=SLOT_DURATION_HOURS)
 
         if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
-            _, suggested_free_slots, free_slots_by_date = generate_free_slots(limit=5)
-
             return jsonify({
                 "success": False,
                 "error": "outside_working_hours",
                 "message": "Цей час поза робочим графіком",
-                "working_hours": "09:00-18:00",
-                "suggested_free_slots": suggested_free_slots,
-                "free_slots_by_date": free_slots_by_date
+                "working_hours": "09:00-18:00"
             }), 409
 
         busy_slots = get_busy_between(start_dt, end_dt)
 
         if len(busy_slots) > 0:
-            _, suggested_free_slots, free_slots_by_date = generate_free_slots(limit=5)
-
             return jsonify({
                 "success": False,
                 "error": "slot_busy",
-                "message": "Цей слот вже зайнятий",
-                "suggested_free_slots": suggested_free_slots,
-                "free_slots_by_date": free_slots_by_date
+                "message": "Цей слот вже зайнятий"
             }), 409
 
         event = {
@@ -224,36 +289,6 @@ def create_event():
             "date": date,
             "time": time
         })
-
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/availability', methods=['GET'])
-def availability():
-    try:
-        current_now = datetime.now(KYIV_TZ)
-
-        busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
-
-        response_data = {
-            "current_date": current_now.strftime("%d.%m.%Y"),
-            "working_hours": "09:00-18:00",
-            "slot_duration_minutes": 60,
-            "has_busy_slots": len(busy_by_date) > 0,
-            "busy_by_date": busy_by_date,
-            "suggested_free_slots": suggested_free_slots,
-            "free_slots_by_date": free_slots_by_date
-        }
-
-        return app.response_class(
-            response=json.dumps(response_data, ensure_ascii=False),
-            mimetype='application/json'
-        )
 
     except Exception as e:
         print(traceback.format_exc())
