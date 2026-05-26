@@ -152,8 +152,34 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
 def availability():
     try:
         current_now = datetime.now(KYIV_TZ)
+        requested_date = request.args.get("date")
 
         busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
+
+        if requested_date:
+            slots_for_date = free_slots_by_date.get(requested_date, [])
+            busy_for_date = busy_by_date.get(requested_date, [])
+
+            response_data = {
+                "success": True,
+                "current_date": current_now.strftime("%d.%m.%Y"),
+                "requested_date": requested_date,
+                "working_hours": "09:00-18:00",
+                "slot_duration_minutes": 60,
+                "available": len(slots_for_date) > 0,
+                "free_slots": slots_for_date[:3],
+                "busy_slots": busy_for_date,
+                "message": (
+                    "Є вільні слоти"
+                    if len(slots_for_date) > 0
+                    else "На цю дату вільного часу немає"
+                )
+            }
+
+            return app.response_class(
+                response=json.dumps(response_data, ensure_ascii=False),
+                mimetype='application/json'
+            )
 
         response_data = {
             "success": True,
@@ -162,53 +188,8 @@ def availability():
             "slot_duration_minutes": 60,
             "has_busy_slots": len(busy_by_date) > 0,
             "busy_by_date": busy_by_date,
-            "suggested_free_slots": suggested_free_slots,
+            "suggested_free_slots": suggested_free_slots[:3],
             "free_slots_by_date": free_slots_by_date
-        }
-
-        return app.response_class(
-            response=json.dumps(response_data, ensure_ascii=False),
-            mimetype='application/json'
-        )
-
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/availability-by-date', methods=['GET'])
-def availability_by_date():
-    try:
-        requested_date = request.args.get("date")
-
-        if not requested_date:
-            return jsonify({
-                "success": False,
-                "error": "date_required",
-                "message": "Потрібно передати дату у форматі dd.mm.yyyy"
-            }), 400
-
-        current_now = datetime.now(KYIV_TZ)
-
-        busy_by_date, _, free_slots_by_date = generate_free_slots()
-
-        free_slots = free_slots_by_date.get(requested_date, [])
-
-        response_data = {
-            "success": True,
-            "current_date": current_now.strftime("%d.%m.%Y"),
-            "date": requested_date,
-            "available": len(free_slots) > 0,
-            "free_slots": free_slots[:3],
-            "busy_slots": busy_by_date.get(requested_date, []),
-            "message": (
-                "Є вільні слоти"
-                if len(free_slots) > 0
-                else "На цю дату вільного часу немає"
-            )
         }
 
         return app.response_class(
