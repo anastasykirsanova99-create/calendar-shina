@@ -47,6 +47,7 @@ def normalize_date(date_str):
         return today + timedelta(days=2)
 
     match = re.search(r"через\s*(\d+)", d)
+
     if match:
         return today + timedelta(days=int(match.group(1)))
 
@@ -168,6 +169,7 @@ def availability():
         suggested_free_slots = []
 
         for hour in range(WORK_START, WORK_END):
+
             start = datetime(
                 date_obj.year,
                 date_obj.month,
@@ -179,10 +181,19 @@ def availability():
 
             end = start + timedelta(hours=SLOT_DURATION)
 
-            if any(
-                overlaps(start, end, b1, b2)
-                for b1, b2 in busy_intervals
-            ):
+            slot_is_busy = False
+
+            for b1, b2 in busy_intervals:
+
+                # Игнорируем события других дней
+                if b1.date() != start.date():
+                    continue
+
+                if overlaps(start, end, b1, b2):
+                    slot_is_busy = True
+                    break
+
+            if slot_is_busy:
                 continue
 
             suggested_free_slots.append(
@@ -191,6 +202,9 @@ def availability():
 
             if len(suggested_free_slots) == 3:
                 break
+
+        print("BUSY:", busy)
+        print("FREE:", suggested_free_slots)
 
         response_data = {
             "success": True,
@@ -203,7 +217,8 @@ def availability():
 
             "slot_duration_minutes": 60,
 
-            "has_busy_slots": len(busy_by_date) > 0,
+            # TRUE = нет свободных слотов
+            "has_busy_slots": len(suggested_free_slots) == 0,
 
             "busy_by_date": busy_by_date,
 
