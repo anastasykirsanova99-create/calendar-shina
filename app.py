@@ -58,20 +58,9 @@ def normalize_date_text(text):
         text = text.replace(symbol, "")
 
     filler_words = [
-        "на ",
-        "у ",
-        "в ",
-        "цей ",
-        "цього ",
-        "цю ",
-        "це ",
-        "будь ласка ",
-        "давайте ",
-        "хочу ",
-        "можна ",
-        "запишіть ",
-        "запис ",
-        "записатися "
+        "на ", "у ", "в ", "цей ", "цього ", "цю ",
+        "будь ласка ", "давайте ", "хочу ", "можна ",
+        "запишіть ", "записатися "
     ]
 
     for word in filler_words:
@@ -88,75 +77,34 @@ def resolve_date_text(date_text):
 
     text = normalize_date_text(date_text)
 
-    is_next = (
-        "наступн" in text
-        or "следующ" in text
-    )
-
-    next_words = [
-        "наступний",
-        "наступного",
-        "наступну",
-        "наступної",
-        "наступна",
-        "следующий",
-        "следующую",
-        "следующего",
-        "следующая"
-    ]
-
-    for word in next_words:
-        text = text.replace(word, "")
-
-    text = " ".join(text.split())
-
     weekdays = {
-        "понеділок": 0,
-        "понеділка": 0,
-
-        "вівторок": 1,
-        "вівторка": 1,
-
-        "середа": 2,
-        "середу": 2,
-        "середи": 2,
-
-        "четвер": 3,
-        "четверг": 3,
-        "четверга": 3,
-
-        "п’ятниця": 4,
-        "п'ятниця": 4,
-        "п’ятницю": 4,
-        "п'ятницю": 4,
-        "пятниця": 4,
-        "пятницю": 4,
-
-        "субота": 5,
-        "суботу": 5,
-
-        "неділя": 6,
-        "неділю": 6,
-        "неділі": 6
+        "понеділок": 0, "понеділка": 0,
+        "вівторок": 1, "вівторка": 1,
+        "середа": 2, "середу": 2,
+        "четвер": 3, "четверга": 3,
+        "п’ятниця": 4, "п'ятниця": 4,
+        "субота": 5, "суботу": 5,
+        "неділя": 6, "неділю": 6
     }
 
-    if text in ["сьогодні", "сегодня"]:
+    if text in ["сьогодні"]:
         return format_date(now)
 
     if text in ["завтра"]:
         return format_date(now + timedelta(days=1))
 
-    if text in ["післязавтра", "послезавтра"]:
+    if text in ["післязавтра"]:
         return format_date(now + timedelta(days=2))
 
+    # 🔥 ИСПРАВЛЕННЫЙ БЛОК
     if text in weekdays:
         target_weekday = weekdays[text]
         today_weekday = now.weekday()
 
         days_ahead = (target_weekday - today_weekday) % 7
 
-        if days_ahead == 0 or is_next:
-            days_ahead += 7
+        if days_ahead == 0:
+            days_ahead = 7
 
         return format_date(now + timedelta(days=days_ahead))
 
@@ -165,20 +113,13 @@ def resolve_date_text(date_text):
     if digits:
         day = int(digits)
 
-        candidate = datetime(
-            now.year,
-            now.month,
-            day,
-            0,
-            0,
-            tzinfo=KYIV_TZ
-        )
+        candidate = datetime(now.year, now.month, day, tzinfo=KYIV_TZ)
 
         if candidate.date() < now.date():
             if now.month == 12:
-                candidate = datetime(now.year + 1, 1, day, 0, 0, tzinfo=KYIV_TZ)
+                candidate = datetime(now.year + 1, 1, day, tzinfo=KYIV_TZ)
             else:
-                candidate = datetime(now.year, now.month + 1, day, 0, 0, tzinfo=KYIV_TZ)
+                candidate = datetime(now.year, now.month + 1, day, tzinfo=KYIV_TZ)
 
         return format_date(candidate)
 
@@ -197,7 +138,7 @@ def get_busy_between(start_dt, end_dt):
     return result["calendars"][CALENDAR_ID].get("busy", [])
 
 
-def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
+def generate_free_slots(days_ahead=DAYS_AHEAD):
     now = datetime.now(KYIV_TZ)
     search_end = now + timedelta(days=10)
 
@@ -211,23 +152,13 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
     result = service.freebusy().query(body=body).execute()
     busy = result["calendars"][CALENDAR_ID].get("busy", [])
 
-    busy_by_date = {}
     busy_intervals = []
 
     for slot in busy:
         busy_start = parse_google_dt(slot["start"])
         busy_end = parse_google_dt(slot["end"])
-
-        date_key = format_date(busy_start)
-
-        busy_by_date.setdefault(date_key, []).append([
-            format_time(busy_start),
-            format_time(busy_end)
-        ])
-
         busy_intervals.append((busy_start, busy_end))
 
-    suggested_free_slots = []
     free_slots_by_date = {}
 
     current_day = now.date()
@@ -246,40 +177,22 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
         checked_days += 1
 
         for hour in range(WORK_START_HOUR, WORK_END_HOUR):
-            slot_start = datetime(
-                day.year,
-                day.month,
-                day.day,
-                hour,
-                0,
-                tzinfo=KYIV_TZ
-            )
-
-            slot_end = slot_start + timedelta(hours=SLOT_DURATION_HOURS)
+            slot_start = datetime(day.year, day.month, day.day, hour, tzinfo=KYIV_TZ)
+            slot_end = slot_start + timedelta(hours=1)
 
             if slot_start < now:
                 continue
 
-            is_busy = False
+            if any(slot_overlaps_busy(slot_start, slot_end, b_start, b_end)
+                   for b_start, b_end in busy_intervals):
+                continue
 
-            for busy_start, busy_end in busy_intervals:
-                if slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
-                    is_busy = True
-                    break
+            date_key = format_date(slot_start)
+            slot_range = f"{format_time(slot_start)}-{format_time(slot_end)}"
 
-            if not is_busy:
-                date_key = format_date(slot_start)
-                start_time = format_time(slot_start)
-                end_time = format_time(slot_end)
-                slot_range = f"{start_time}-{end_time}"
+            free_slots_by_date.setdefault(date_key, []).append(slot_range)
 
-                suggested_free_slots.append(f"{date_key} {start_time}")
-                free_slots_by_date.setdefault(date_key, []).append(slot_range)
-
-    if limit:
-        suggested_free_slots = suggested_free_slots[:limit]
-
-    return busy_by_date, suggested_free_slots, free_slots_by_date
+    return free_slots_by_date
 
 
 @app.route('/availability', methods=['GET'])
@@ -287,157 +200,28 @@ def availability():
     try:
         current_now = datetime.now(KYIV_TZ)
 
-        requested_date = request.args.get("date")
         date_text = request.args.get("date_text")
+        requested_date = resolve_date_text(date_text)
 
-        if date_text and not requested_date:
-            requested_date = resolve_date_text(date_text)
+        free_slots_by_date = generate_free_slots()
 
-        busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
+        requested_dt = datetime.strptime(requested_date, "%d.%m.%Y").replace(tzinfo=KYIV_TZ)
+        working_day = is_working_day(requested_dt)
 
-        if requested_date:
-            requested_dt = datetime.strptime(
-                requested_date,
-                "%d.%m.%Y"
-            ).replace(tzinfo=KYIV_TZ)
+        slots = free_slots_by_date.get(requested_date, []) if working_day else []
 
-            working_day = is_working_day(requested_dt)
-
-            slots_for_date = free_slots_by_date.get(requested_date, []) if working_day else []
-            busy_for_date = busy_by_date.get(requested_date, [])
-
-            if not working_day:
-                message = "У вихідні ми не працюємо"
-            else:
-                message = (
-                    "Є вільні слоти"
-                    if len(slots_for_date) > 0
-                    else "На цю дату вільного часу немає"
-                )
-
-            response_data = {
-                "success": True,
-                "current_date": current_now.strftime("%d.%m.%Y"),
-                "requested_date": requested_date,
-                "working_hours": "09:00-18:00",
-                "slot_duration_minutes": 60,
-                "is_working_day": working_day,
-                "available": working_day and len(slots_for_date) > 0,
-                "free_slots": slots_for_date[:3],
-                "busy_slots": busy_for_date,
-                "message": message
-            }
-
-            return app.response_class(
-                response=json.dumps(response_data, ensure_ascii=False),
-                mimetype='application/json'
-            )
-
-        response_data = {
+        return jsonify({
             "success": True,
             "current_date": current_now.strftime("%d.%m.%Y"),
-            "working_hours": "09:00-18:00",
-            "slot_duration_minutes": 60,
-            "has_busy_slots": len(busy_by_date) > 0,
-            "busy_by_date": busy_by_date,
-            "suggested_free_slots": suggested_free_slots[:3],
-            "free_slots_by_date": free_slots_by_date
-        }
-
-        return app.response_class(
-            response=json.dumps(response_data, ensure_ascii=False),
-            mimetype='application/json'
-        )
-
-    except Exception as e:
-        print(traceback.format_exc())
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
-
-
-@app.route('/create-event', methods=['POST'])
-def create_event():
-    try:
-        data = request.json
-
-        name = data.get('name')
-        phone = data.get('phone')
-        service_name = data.get('service')
-        car_type = data.get('car_type')
-        wheel_radius = data.get('wheel_radius')
-        plate_number = data.get('plate_number')
-        date = data.get('date')
-        time = data.get('time')
-
-        start_dt = datetime.strptime(
-            f"{date} {time}",
-            "%d.%m.%Y %H:%M"
-        ).replace(tzinfo=KYIV_TZ)
-
-        end_dt = start_dt + timedelta(hours=SLOT_DURATION_HOURS)
-
-        if not is_working_day(start_dt):
-            return jsonify({
-                "success": False,
-                "error": "non_working_day",
-                "message": "У вихідні ми не працюємо"
-            }), 409
-
-        if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
-            return jsonify({
-                "success": False,
-                "error": "outside_working_hours",
-                "message": "Цей час поза робочим графіком",
-                "working_hours": "09:00-18:00"
-            }), 409
-
-        busy_slots = get_busy_between(start_dt, end_dt)
-
-        if len(busy_slots) > 0:
-            return jsonify({
-                "success": False,
-                "error": "slot_busy",
-                "message": "Цей слот вже зайнятий"
-            }), 409
-
-        event = {
-            'summary': f'{service_name} - {name}',
-            'description': (
-                f'Телефон: {phone}\n'
-                f'Авто: {car_type}\n'
-                f'Радіус коліс: {wheel_radius}\n'
-                f'Номер авто: {plate_number}'
-            ),
-            'start': {
-                'dateTime': start_dt.isoformat(),
-                'timeZone': TIMEZONE,
-            },
-            'end': {
-                'dateTime': end_dt.isoformat(),
-                'timeZone': TIMEZONE,
-            },
-        }
-
-        service.events().insert(
-            calendarId=CALENDAR_ID,
-            body=event
-        ).execute()
-
-        return jsonify({
-            "success": True,
-            "message": "Appointment created",
-            "date": date,
-            "time": time
+            "requested_date": requested_date,
+            "is_working_day": working_day,
+            "available": working_day and len(slots) > 0,
+            "free_slots": slots[:3]
         })
 
     except Exception as e:
         print(traceback.format_exc())
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 if __name__ == '__main__':
