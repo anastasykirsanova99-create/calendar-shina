@@ -51,6 +51,90 @@ def slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
     return slot_start < busy_end and slot_end > busy_start
 
 
+def resolve_date_text(date_text):
+    now = datetime.now(KYIV_TZ)
+
+    if not date_text:
+        return None
+
+    text = date_text.lower().strip()
+
+    weekdays = {
+        "понеділок": 0,
+        "понеділка": 0,
+        "понеділок.": 0,
+
+        "вівторок": 1,
+        "вівторка": 1,
+
+        "середа": 2,
+        "середу": 2,
+        "середи": 2,
+
+        "четвер": 3,
+        "четверг": 3,
+        "четверга": 3,
+
+        "п’ятниця": 4,
+        "п'ятниця": 4,
+        "п’ятницю": 4,
+        "п'ятницю": 4,
+        "пятниця": 4,
+        "пятницю": 4,
+
+        "субота": 5,
+        "суботу": 5,
+
+        "неділя": 6,
+        "неділю": 6,
+        "неділі": 6
+    }
+
+    if text in ["сьогодні", "сегодня"]:
+        return format_date(now)
+
+    if text in ["завтра"]:
+        return format_date(now + timedelta(days=1))
+
+    if text in ["післязавтра", "послезавтра"]:
+        return format_date(now + timedelta(days=2))
+
+    if text in weekdays:
+        target_weekday = weekdays[text]
+        today_weekday = now.weekday()
+
+        days_ahead = (target_weekday - today_weekday) % 7
+
+        if days_ahead == 0:
+            days_ahead = 7
+
+        return format_date(now + timedelta(days=days_ahead))
+
+    digits = ''.join(ch for ch in text if ch.isdigit())
+
+    if digits:
+        day = int(digits)
+
+        candidate = datetime(
+            now.year,
+            now.month,
+            day,
+            0,
+            0,
+            tzinfo=KYIV_TZ
+        )
+
+        if candidate.date() < now.date():
+            if now.month == 12:
+                candidate = datetime(now.year + 1, 1, day, 0, 0, tzinfo=KYIV_TZ)
+            else:
+                candidate = datetime(now.year, now.month + 1, day, 0, 0, tzinfo=KYIV_TZ)
+
+        return format_date(candidate)
+
+    return None
+
+
 def get_busy_between(start_dt, end_dt):
     body = {
         "timeMin": start_dt.astimezone(timezone.utc).isoformat(),
@@ -152,7 +236,12 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
 def availability():
     try:
         current_now = datetime.now(KYIV_TZ)
+
         requested_date = request.args.get("date")
+        date_text = request.args.get("date_text")
+
+        if date_text and not requested_date:
+            requested_date = resolve_date_text(date_text)
 
         busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
 
@@ -215,6 +304,7 @@ def create_event():
         service_name = data.get('service')
         car_type = data.get('car_type')
         wheel_radius = data.get('wheel_radius')
+        plate_number = data.get('plate_number')
         date = data.get('date')
         time = data.get('time')
 
@@ -247,7 +337,8 @@ def create_event():
             'description': (
                 f'Телефон: {phone}\n'
                 f'Авто: {car_type}\n'
-                f'Радіус коліс: {wheel_radius}'
+                f'Радіус коліс: {wheel_radius}\n'
+                f'Номер авто: {plate_number}'
             ),
             'start': {
                 'dateTime': start_dt.isoformat(),
