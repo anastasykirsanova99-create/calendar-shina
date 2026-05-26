@@ -53,7 +53,9 @@ def normalize_date(date_str):
     try:
         if len(d) == 5:
             d = f"{d}.2026"
+
         return datetime.strptime(d, "%d.%m.%Y").date()
+
     except:
         return today
 
@@ -66,11 +68,18 @@ def normalize_time(time_str):
 
     t = str(time_str).lower().strip()
 
-    # диапазон 14:00-15:00 → берем старт
+    # 14:00-15:00 -> 14:00
     if "-" in t:
         t = t.split("-")[0].strip()
 
+    if "час дня" in t:
+        return "13:00"
+
+    if "пів на другу" in t:
+        return "13:30"
+
     match = re.search(r"(\d{1,2})", t)
+
     if match:
         hour = int(match.group(1))
 
@@ -80,19 +89,15 @@ def normalize_time(time_str):
 
         return f"{hour:02d}:00"
 
-    if "час дня" in t:
-        return "13:00"
-
-    if "пів на другу" in t:
-        return "13:30"
-
     return "09:00"
 
 
-# ---------------- CALENDAR HELPERS ----------------
+# ---------------- HELPERS ----------------
 
 def parse_google_dt(value):
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(KYIV_TZ)
+    return datetime.fromisoformat(
+        value.replace("Z", "+00:00")
+    ).astimezone(KYIV_TZ)
 
 
 def format_date(dt):
@@ -101,6 +106,10 @@ def format_date(dt):
 
 def format_time(dt):
     return dt.strftime("%H:%M")
+
+
+def overlaps(a1, a2, b1, b2):
+    return a1 < b2 and a2 > b1
 
 
 def get_busy(start_dt, end_dt):
@@ -112,14 +121,11 @@ def get_busy(start_dt, end_dt):
     }
 
     result = service.freebusy().query(body=body).execute()
+
     return result["calendars"][CALENDAR_ID].get("busy", [])
 
 
-def overlaps(a1, a2, b1, b2):
-    return a1 < b2 and a2 > b1
-
-
-# ---------------- AVAILABILITY (FIXED 405) ----------------
+# ---------------- AVAILABILITY ----------------
 
 @app.route('/availability', methods=['GET', 'POST'])
 def availability():
@@ -133,38 +139,88 @@ def availability():
 
         date_obj = normalize_date(date_raw)
 
-        day_start = datetime.combine(date_obj, datetime.min.time(), tzinfo=KYIV_TZ)
+        day_start = datetime.combine(
+            date_obj,
+            datetime.min.time(),
+            tzinfo=KYIV_TZ
+        )
+
         day_end = day_start + timedelta(days=1)
 
         busy = get_busy(day_start, day_end)
 
-        busy_intervals = [
-            (parse_google_dt(b["start"]), parse_google_dt(b["end"]))
-            for b in busy
-        ]
+        busy_intervals = []
+        busy_by_date = {}
 
-        slots = []
+        for item in busy:
+            busy_start = parse_google_dt(item["start"])
+            busy_end = parse_google_dt(item["end"])
+
+            busy_intervals.append((busy_start, busy_end))
+
+            date_key = format_date(busy_start)
+
+            busy_by_date.setdefault(date_key, []).append([
+                format_time(busy_start),
+                format_time(busy_end)
+            ])
+
+        suggested_free_slots = []
 
         for hour in range(WORK_START, WORK_END):
-            start = datetime(date_obj.year, date_obj.month, date_obj.day, hour, 0, tzinfo=KYIV_TZ)
+            start = datetime(
+                date_obj.year,
+                date_obj.month,
+                date_obj.day,
+                hour,
+                0,
+                tzinfo=KYIV_TZ
+            )
+
             end = start + timedelta(hours=SLOT_DURATION)
 
-            if any(overlaps(start, end, b1, b2) for b1, b2 in busy_intervals):
+            if any(
+                overlaps(start, end, b1, b2)
+                for b1, b2 in busy_intervals
+            ):
                 continue
 
-            slots.append(f"{format_time(start)}-{format_time(end)}")
+            suggested_free_slots.append(
+                f"{format_date(start)} {format_time(start)}"
+            )
 
-            if len(slots) == 3:
+            if len(suggested_free_slots) == 3:
                 break
 
-        return jsonify({
+        response_data = {
             "success": True,
-            "date": format_date(day_start),
-            "slots": slots
-        })
+
+            "current_date": format_date(
+                datetime.now(KYIV_TZ)
+            ),
+
+            "working_hours": "09:00-18:00",
+
+            "slot_duration_minutes": 60,
+
+            "has_busy_slots": len(busy_by_date) > 0,
+
+            "busy_by_date": busy_by_date,
+
+            "suggested_free_slots": suggested_free_slots
+        }
+
+        return app.response_class(
+            response=json.dumps(
+                response_data,
+                ensure_ascii=False
+            ),
+            mimetype='application/json'
+        )
 
     except Exception as e:
         print(traceback.format_exc())
+
         return jsonify({
             "success": False,
             "error": str(e)
@@ -180,7 +236,7 @@ def create_event():
 
         name = data.get("name")
         phone = data.get("phone")
-        service = data.get("service")
+        service_name = data.get("service")
 
         date_obj = normalize_date(data.get("date"))
         time_str = normalize_time(data.get("time"))
@@ -192,12 +248,15 @@ def create_event():
 
         end_dt = start_dt + timedelta(hours=SLOT_DURATION)
 
+        # Проверка рабочих часов
         if start_dt.hour < WORK_START or end_dt.hour > WORK_END:
             return jsonify({
                 "success": False,
-                "error": "outside_working_hours"
+                "error": "outside_working_hours",
+                "working_hours": "09:00-18:00"
             }), 409
 
+        # Проверка занятости
         busy = get_busy(start_dt, end_dt)
 
         if busy:
@@ -206,13 +265,17 @@ def create_event():
                 "error": "slot_busy"
             }), 409
 
+        # Создание события
         event = {
-            "summary": f"{service} - {name}",
-            "description": f"Phone: {phone}",
+            "summary": f"{service_name} - {name}",
+
+            "description": f"Телефон: {phone}",
+
             "start": {
                 "dateTime": start_dt.isoformat(),
                 "timeZone": "Europe/Kyiv"
             },
+
             "end": {
                 "dateTime": end_dt.isoformat(),
                 "timeZone": "Europe/Kyiv"
@@ -227,11 +290,12 @@ def create_event():
         return jsonify({
             "success": True,
             "date": format_date(start_dt),
-            "time": f"{format_time(start_dt)}-{format_time(end_dt)}"
+            "time": format_time(start_dt)
         })
 
     except Exception as e:
         print(traceback.format_exc())
+
         return jsonify({
             "success": False,
             "error": str(e)
