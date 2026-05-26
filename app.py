@@ -94,6 +94,7 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
         busy_intervals.append((busy_start, busy_end))
 
     suggested_free_slots = []
+    free_slots_by_date = {}
 
     current_day = now.date()
     checked_days = 0
@@ -133,14 +134,21 @@ def generate_free_slots(days_ahead=DAYS_AHEAD, limit=None):
                     break
 
             if not is_busy:
+                date_key = format_date(slot_start)
+                start_time = format_time(slot_start)
+                end_time = format_time(slot_end)
+                slot_range = f"{start_time}-{end_time}"
+
                 suggested_free_slots.append(
-                    f"{format_date(slot_start)} {format_time(slot_start)}"
+                    f"{date_key} {start_time}"
                 )
+
+                free_slots_by_date.setdefault(date_key, []).append(slot_range)
 
     if limit:
         suggested_free_slots = suggested_free_slots[:limit]
 
-    return busy_by_date, suggested_free_slots
+    return busy_by_date, suggested_free_slots, free_slots_by_date
 
 
 @app.route('/create-event', methods=['POST'])
@@ -151,6 +159,8 @@ def create_event():
         name = data.get('name')
         phone = data.get('phone')
         service_name = data.get('service')
+        car_type = data.get('car_type')
+        wheel_radius = data.get('wheel_radius')
         date = data.get('date')
         time = data.get('time')
 
@@ -162,31 +172,37 @@ def create_event():
         end_dt = start_dt + timedelta(hours=SLOT_DURATION_HOURS)
 
         if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
-            _, suggested_free_slots = generate_free_slots(limit=5)
+            _, suggested_free_slots, free_slots_by_date = generate_free_slots(limit=5)
 
             return jsonify({
                 "success": False,
                 "error": "outside_working_hours",
                 "message": "Цей час поза робочим графіком",
                 "working_hours": "09:00-18:00",
-                "suggested_free_slots": suggested_free_slots
+                "suggested_free_slots": suggested_free_slots,
+                "free_slots_by_date": free_slots_by_date
             }), 409
 
         busy_slots = get_busy_between(start_dt, end_dt)
 
         if len(busy_slots) > 0:
-            _, suggested_free_slots = generate_free_slots(limit=5)
+            _, suggested_free_slots, free_slots_by_date = generate_free_slots(limit=5)
 
             return jsonify({
                 "success": False,
                 "error": "slot_busy",
                 "message": "Цей слот вже зайнятий",
-                "suggested_free_slots": suggested_free_slots
+                "suggested_free_slots": suggested_free_slots,
+                "free_slots_by_date": free_slots_by_date
             }), 409
 
         event = {
             'summary': f'{service_name} - {name}',
-            'description': f'Телефон: {phone}',
+            'description': (
+                f'Телефон: {phone}\n'
+                f'Авто: {car_type}\n'
+                f'Радіус коліс: {wheel_radius}'
+            ),
             'start': {
                 'dateTime': start_dt.isoformat(),
                 'timeZone': TIMEZONE,
@@ -222,7 +238,7 @@ def availability():
     try:
         current_now = datetime.now(KYIV_TZ)
 
-        busy_by_date, suggested_free_slots = generate_free_slots()
+        busy_by_date, suggested_free_slots, free_slots_by_date = generate_free_slots()
 
         response_data = {
             "current_date": current_now.strftime("%d.%m.%Y"),
@@ -230,7 +246,8 @@ def availability():
             "slot_duration_minutes": 60,
             "has_busy_slots": len(busy_by_date) > 0,
             "busy_by_date": busy_by_date,
-            "suggested_free_slots": suggested_free_slots
+            "suggested_free_slots": suggested_free_slots,
+            "free_slots_by_date": free_slots_by_date
         }
 
         return app.response_class(
