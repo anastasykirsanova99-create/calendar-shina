@@ -51,6 +51,60 @@ def slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
     return slot_start < busy_end and slot_end > busy_start
 
 
+def extract_time_period(date_text):
+    if not date_text:
+        return None
+
+    text = date_text.lower().strip()
+
+    if any(x in text for x in ["зранку", "вранці", "ранок", "до обіду"]):
+        return "morning"
+
+    if any(x in text for x in ["після обіду", "післяобід", "вдень", "день"]):
+        return "afternoon"
+
+    if any(x in text for x in ["увечері", "ввечері", "вечером", "на вечір", "вечір", "після роботи"]):
+        return "evening"
+
+    return None
+
+
+def filter_slots_by_period(slots, period):
+    if not period:
+        return slots
+
+    filtered = []
+
+    for slot in slots:
+        start_time = slot.split("-")[0]
+        hour = int(start_time.split(":")[0])
+
+        if period == "morning" and 9 <= hour < 12:
+            filtered.append(slot)
+
+        elif period == "afternoon" and 12 <= hour < 17:
+            filtered.append(slot)
+
+        elif period == "evening" and 17 <= hour < 18:
+            filtered.append(slot)
+
+    return filtered
+
+
+def clean_period_words(text):
+    phrases_to_remove = [
+        "зранку", "вранці", "ранок", "до обіду",
+        "після обіду", "післяобід", "вдень", "день",
+        "увечері", "ввечері", "вечером", "на вечір",
+        "вечір", "після роботи"
+    ]
+
+    for phrase in phrases_to_remove:
+        text = text.replace(phrase, "")
+
+    return text.strip()
+
+
 def resolve_date_text(date_text):
     now = datetime.now(KYIV_TZ)
 
@@ -62,7 +116,10 @@ def resolve_date_text(date_text):
     for symbol in [".", ",", "!", "?"]:
         original_text = original_text.replace(symbol, "")
 
-    text = original_text
+    text = clean_period_words(original_text).strip()
+
+    if not text:
+        return format_date(now)
 
     weekdays = {
         "понеділок": 0,
@@ -252,6 +309,8 @@ def availability():
         requested_date = request.args.get("date")
         date_text = request.args.get("date_text")
 
+        time_period = extract_time_period(date_text)
+
         if date_text and not requested_date:
             requested_date = resolve_date_text(date_text)
 
@@ -270,6 +329,8 @@ def availability():
                 if working_day else []
             )
 
+            slots_for_date = filter_slots_by_period(slots_for_date, time_period)
+
             busy_for_date = busy_by_date.get(requested_date, [])
 
             nearest_available_date = None
@@ -277,9 +338,11 @@ def availability():
 
             if working_day and len(slots_for_date) == 0:
                 for date_key, slots in free_slots_by_date.items():
-                    if len(slots) > 0:
+                    filtered_slots = filter_slots_by_period(slots, time_period)
+
+                    if len(filtered_slots) > 0:
                         nearest_available_date = date_key
-                        nearest_free_slots = slots[:3]
+                        nearest_free_slots = filtered_slots[:3]
                         break
 
             response_data = {
@@ -288,6 +351,7 @@ def availability():
                 "requested_date": requested_date,
                 "working_hours": "09:00-18:00",
                 "slot_duration_minutes": 60,
+                "time_period": time_period,
                 "is_working_day": working_day,
                 "available": working_day and len(slots_for_date) > 0,
                 "free_slots": slots_for_date[:3],
