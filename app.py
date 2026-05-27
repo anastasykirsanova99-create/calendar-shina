@@ -51,35 +51,6 @@ def slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
     return slot_start < busy_end and slot_end > busy_start
 
 
-def get_caller_phone(data):
-    phone = (
-        data.get("phone")
-        or data.get("caller_id")
-        or data.get("callerId")
-        or data.get("from")
-        or request.headers.get("X-Caller-Phone")
-        or request.headers.get("X-Caller-ID")
-        or request.args.get("phone")
-        or request.args.get("caller_id")
-    )
-
-    if not phone:
-        return None
-
-    phone = str(phone).strip()
-
-    phone = (
-        phone
-        .replace("+", "")
-        .replace(" ", "")
-        .replace("-", "")
-        .replace("(", "")
-        .replace(")", "")
-    )
-
-    return phone
-
-
 def resolve_date_text(date_text):
     now = datetime.now(KYIV_TZ)
 
@@ -96,27 +67,21 @@ def resolve_date_text(date_text):
     weekdays = {
         "понеділок": 0,
         "понеділка": 0,
-
         "вівторок": 1,
         "вівторка": 1,
-
         "середа": 2,
         "середу": 2,
         "середи": 2,
-
         "четвер": 3,
         "четверга": 3,
-
         "пятниця": 4,
         "пятницю": 4,
         "п’ятниця": 4,
         "п’ятницю": 4,
         "п'ятниця": 4,
         "п'ятницю": 4,
-
         "субота": 5,
         "суботу": 5,
-
         "неділя": 6,
         "неділю": 6,
         "неділі": 6
@@ -131,10 +96,7 @@ def resolve_date_text(date_text):
     if text in ["післязавтра", "послезавтра"]:
         return format_date(now + timedelta(days=2))
 
-    is_next = (
-        "наступ" in text
-        or "следующ" in text
-    )
+    is_next = "наступ" in text or "следующ" in text
 
     words_to_remove = [
         "на", "у", "в", "цей", "цього", "цю",
@@ -179,23 +141,9 @@ def resolve_date_text(date_text):
 
         if candidate.date() < now.date():
             if now.month == 12:
-                candidate = datetime(
-                    now.year + 1,
-                    1,
-                    day,
-                    0,
-                    0,
-                    tzinfo=KYIV_TZ
-                )
+                candidate = datetime(now.year + 1, 1, day, 0, 0, tzinfo=KYIV_TZ)
             else:
-                candidate = datetime(
-                    now.year,
-                    now.month + 1,
-                    day,
-                    0,
-                    0,
-                    tzinfo=KYIV_TZ
-                )
+                candidate = datetime(now.year, now.month + 1, day, 0, 0, tzinfo=KYIV_TZ)
 
         return format_date(candidate)
 
@@ -280,12 +228,7 @@ def generate_free_slots(days_ahead=DAYS_AHEAD):
             is_busy = False
 
             for busy_start, busy_end in busy_intervals:
-                if slot_overlaps_busy(
-                    slot_start,
-                    slot_end,
-                    busy_start,
-                    busy_end
-                ):
+                if slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
                     is_busy = True
                     break
 
@@ -295,14 +238,8 @@ def generate_free_slots(days_ahead=DAYS_AHEAD):
             date_key = format_date(slot_start)
             slot_range = f"{format_time(slot_start)}-{format_time(slot_end)}"
 
-            suggested_free_slots.append(
-                f"{date_key} {format_time(slot_start)}"
-            )
-
-            free_slots_by_date.setdefault(
-                date_key,
-                []
-            ).append(slot_range)
+            suggested_free_slots.append(f"{date_key} {format_time(slot_start)}")
+            free_slots_by_date.setdefault(date_key, []).append(slot_range)
 
     return busy_by_date, suggested_free_slots, free_slots_by_date
 
@@ -399,15 +336,6 @@ def create_event():
         date = data.get('date')
         time = data.get('time')
 
-        phone = get_caller_phone(data)
-
-        if not phone:
-            return jsonify({
-                "success": False,
-                "error": "phone_not_found",
-                "message": "Не вдалося визначити номер телефону з вхідного дзвінка"
-            }), 400
-
         start_dt = datetime.strptime(
             f"{date} {time}",
             "%d.%m.%Y %H:%M"
@@ -422,10 +350,7 @@ def create_event():
                 "message": "У вихідні ми не працюємо"
             }), 409
 
-        if (
-            start_dt.hour < WORK_START_HOUR
-            or end_dt.hour > WORK_END_HOUR
-        ):
+        if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
             return jsonify({
                 "success": False,
                 "error": "outside_working_hours",
@@ -445,7 +370,6 @@ def create_event():
         event = {
             'summary': f'{service_name} - {name}',
             'description': (
-                f'Телефон: {phone}\n'
                 f'Авто: {car_type}\n'
                 f'Радіус коліс: {wheel_radius}\n'
                 f'Номер авто: {plate_number}'
@@ -469,8 +393,7 @@ def create_event():
             "success": True,
             "message": "Appointment created",
             "date": date,
-            "time": time,
-            "phone": phone
+            "time": time
         })
 
     except Exception as e:
