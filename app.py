@@ -51,29 +51,47 @@ def slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
     return slot_start < busy_end and slot_end > busy_start
 
 
+def get_caller_phone(data):
+    phone = (
+        data.get("phone")
+        or data.get("caller_id")
+        or data.get("callerId")
+        or data.get("from")
+        or request.headers.get("X-Caller-Phone")
+        or request.headers.get("X-Caller-ID")
+        or request.args.get("phone")
+        or request.args.get("caller_id")
+    )
+
+    if not phone:
+        return None
+
+    phone = str(phone).strip()
+
+    phone = (
+        phone
+        .replace("+", "")
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("(", "")
+        .replace(")", "")
+    )
+
+    return phone
+
+
 def resolve_date_text(date_text):
     now = datetime.now(KYIV_TZ)
 
     if not date_text:
         return None
 
-    text = date_text.lower().strip()
+    original_text = date_text.lower().strip()
 
     for symbol in [".", ",", "!", "?"]:
-        text = text.replace(symbol, "")
+        original_text = original_text.replace(symbol, "")
 
-    words_to_remove = [
-        "на", "у", "в", "цей", "цього", "цю",
-        "будь", "ласка", "давайте", "хочу", "можна",
-        "запишіть", "запис", "записатися",
-        "наступний", "наступного", "наступну",
-        "наступної", "наступна",
-        "следующий", "следующую", "следующего", "следующая"
-    ]
-
-    parts = text.split()
-    parts = [word for word in parts if word not in words_to_remove]
-    text = " ".join(parts)
+    text = original_text
 
     weekdays = {
         "понеділок": 0,
@@ -87,7 +105,6 @@ def resolve_date_text(date_text):
         "середи": 2,
 
         "четвер": 3,
-        "четверг": 3,
         "четверга": 3,
 
         "пятниця": 4,
@@ -114,6 +131,24 @@ def resolve_date_text(date_text):
     if text in ["післязавтра", "послезавтра"]:
         return format_date(now + timedelta(days=2))
 
+    is_next = (
+        "наступ" in text
+        or "следующ" in text
+    )
+
+    words_to_remove = [
+        "на", "у", "в", "цей", "цього", "цю",
+        "будь", "ласка", "давайте", "хочу", "можна",
+        "запишіть", "запис", "записатися",
+        "наступний", "наступного", "наступну",
+        "наступної", "наступна",
+        "следующий", "следующую", "следующего", "следующая"
+    ]
+
+    parts = text.split()
+    parts = [word for word in parts if word not in words_to_remove]
+    text = " ".join(parts)
+
     if text in weekdays:
         target_weekday = weekdays[text]
         today_weekday = now.weekday()
@@ -122,6 +157,9 @@ def resolve_date_text(date_text):
 
         if days_ahead == 0:
             days_ahead = 7
+
+        if is_next:
+            days_ahead += 7
 
         return format_date(now + timedelta(days=days_ahead))
 
@@ -141,9 +179,23 @@ def resolve_date_text(date_text):
 
         if candidate.date() < now.date():
             if now.month == 12:
-                candidate = datetime(now.year + 1, 1, day, 0, 0, tzinfo=KYIV_TZ)
+                candidate = datetime(
+                    now.year + 1,
+                    1,
+                    day,
+                    0,
+                    0,
+                    tzinfo=KYIV_TZ
+                )
             else:
-                candidate = datetime(now.year, now.month + 1, day, 0, 0, tzinfo=KYIV_TZ)
+                candidate = datetime(
+                    now.year,
+                    now.month + 1,
+                    day,
+                    0,
+                    0,
+                    tzinfo=KYIV_TZ
+                )
 
         return format_date(candidate)
 
@@ -228,7 +280,12 @@ def generate_free_slots(days_ahead=DAYS_AHEAD):
             is_busy = False
 
             for busy_start, busy_end in busy_intervals:
-                if slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
+                if slot_overlaps_busy(
+                    slot_start,
+                    slot_end,
+                    busy_start,
+                    busy_end
+                ):
                     is_busy = True
                     break
 
@@ -238,8 +295,14 @@ def generate_free_slots(days_ahead=DAYS_AHEAD):
             date_key = format_date(slot_start)
             slot_range = f"{format_time(slot_start)}-{format_time(slot_end)}"
 
-            suggested_free_slots.append(f"{date_key} {format_time(slot_start)}")
-            free_slots_by_date.setdefault(date_key, []).append(slot_range)
+            suggested_free_slots.append(
+                f"{date_key} {format_time(slot_start)}"
+            )
+
+            free_slots_by_date.setdefault(
+                date_key,
+                []
+            ).append(slot_range)
 
     return busy_by_date, suggested_free_slots, free_slots_by_date
 
@@ -264,8 +327,23 @@ def availability():
             ).replace(tzinfo=KYIV_TZ)
 
             working_day = is_working_day(requested_dt)
-            slots_for_date = free_slots_by_date.get(requested_date, []) if working_day else []
+
+            slots_for_date = (
+                free_slots_by_date.get(requested_date, [])
+                if working_day else []
+            )
+
             busy_for_date = busy_by_date.get(requested_date, [])
+
+            nearest_available_date = None
+            nearest_free_slots = []
+
+            if working_day and len(slots_for_date) == 0:
+                for date_key, slots in free_slots_by_date.items():
+                    if len(slots) > 0:
+                        nearest_available_date = date_key
+                        nearest_free_slots = slots[:3]
+                        break
 
             response_data = {
                 "success": True,
@@ -276,6 +354,8 @@ def availability():
                 "is_working_day": working_day,
                 "available": working_day and len(slots_for_date) > 0,
                 "free_slots": slots_for_date[:3],
+                "nearest_available_date": nearest_available_date,
+                "nearest_free_slots": nearest_free_slots,
                 "busy_slots": busy_for_date,
                 "message": (
                     "У вихідні ми не працюємо"
@@ -299,6 +379,7 @@ def availability():
 
     except Exception as e:
         print(traceback.format_exc())
+
         return jsonify({
             "success": False,
             "error": str(e)
@@ -311,13 +392,21 @@ def create_event():
         data = request.json
 
         name = data.get('name')
-        phone = data.get('phone')
         service_name = data.get('service')
         car_type = data.get('car_type')
         wheel_radius = data.get('wheel_radius')
         plate_number = data.get('plate_number')
         date = data.get('date')
         time = data.get('time')
+
+        phone = get_caller_phone(data)
+
+        if not phone:
+            return jsonify({
+                "success": False,
+                "error": "phone_not_found",
+                "message": "Не вдалося визначити номер телефону з вхідного дзвінка"
+            }), 400
 
         start_dt = datetime.strptime(
             f"{date} {time}",
@@ -333,7 +422,10 @@ def create_event():
                 "message": "У вихідні ми не працюємо"
             }), 409
 
-        if start_dt.hour < WORK_START_HOUR or end_dt.hour > WORK_END_HOUR:
+        if (
+            start_dt.hour < WORK_START_HOUR
+            or end_dt.hour > WORK_END_HOUR
+        ):
             return jsonify({
                 "success": False,
                 "error": "outside_working_hours",
@@ -377,11 +469,13 @@ def create_event():
             "success": True,
             "message": "Appointment created",
             "date": date,
-            "time": time
+            "time": time,
+            "phone": phone
         })
 
     except Exception as e:
         print(traceback.format_exc())
+
         return jsonify({
             "success": False,
             "error": str(e)
