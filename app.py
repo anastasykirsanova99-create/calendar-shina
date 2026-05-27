@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import json
 import os
 import traceback
+import re
 
 app = Flask(__name__)
 
@@ -51,11 +52,50 @@ def slot_overlaps_busy(slot_start, slot_end, busy_start, busy_end):
     return slot_start < busy_end and slot_end > busy_start
 
 
-def extract_time_period(date_text):
-    if not date_text:
-        return None
+def normalize_text(text):
+    if not text:
+        return ""
 
-    text = date_text.lower().strip()
+    text = text.lower().strip()
+
+    for symbol in [".", ",", "!", "?"]:
+        text = text.replace(symbol, "")
+
+    return text
+
+
+def words_to_hour(text):
+    text = normalize_text(text)
+
+    mapping = {
+        "дев’яти": 9, "девяти": 9, "девятої": 9, "девять": 9, "девяти": 9,
+        "десяти": 10, "десятої": 10, "десять": 10,
+        "одинадцяти": 11, "одинадцятої": 11, "одинадцать": 11,
+        "дванадцяти": 12, "дванадцятої": 12, "дванадцать": 12,
+        "часу": 13, "першої": 13, "первой": 13, "одної": 13,
+        "двох": 14, "другої": 14, "двух": 14, "второй": 14,
+        "трьох": 15, "третьої": 15, "трех": 15, "трёх": 15,
+        "чотирьох": 16, "четвертої": 16, "четырех": 16, "четырёх": 16,
+        "п’яти": 17, "пяти": 17, "п’ятої": 17, "пятої": 17,
+        "шести": 18, "шостої": 18, "шесть": 18
+    }
+
+    numeric_match = re.search(r'\b([0-9]{1,2})\b', text)
+    if numeric_match:
+        hour = int(numeric_match.group(1))
+        if 1 <= hour <= 8:
+            hour += 12
+        return hour
+
+    for word, hour in mapping.items():
+        if word in text:
+            return hour
+
+    return None
+
+
+def extract_time_period(date_text):
+    text = normalize_text(date_text)
 
     if any(x in text for x in ["зранку", "вранці", "ранок", "до обіду"]):
         return "morning"
@@ -67,6 +107,33 @@ def extract_time_period(date_text):
         return "evening"
 
     return None
+
+
+def extract_time_range(date_text):
+    text = normalize_text(date_text)
+
+    if not text:
+        return None, None
+
+    # "після двох", "после двух", "після 14"
+    if "після" in text or "после" in text:
+        hour = words_to_hour(text)
+        if hour:
+            return hour, WORK_END_HOUR
+
+    # "з часу до трьох", "з 13 до 15", "с часу до трех"
+    if ("з " in text or "с " in text) and "до" in text:
+        parts = text.split("до", 1)
+        start_part = parts[0]
+        end_part = parts[1]
+
+        start_hour = words_to_hour(start_part)
+        end_hour = words_to_hour(end_part)
+
+        if start_hour and end_hour:
+            return start_hour, end_hour
+
+    return None, None
 
 
 def filter_slots_by_period(slots, period):
@@ -91,18 +158,52 @@ def filter_slots_by_period(slots, period):
     return filtered
 
 
-def clean_period_words(text):
+def filter_slots_by_time_range(slots, start_hour, end_hour):
+    if not start_hour and not end_hour:
+        return slots
+
+    filtered = []
+
+    for slot in slots:
+        slot_start = slot.split("-")[0]
+        hour = int(slot_start.split(":")[0])
+
+        if start_hour and end_hour:
+            if start_hour <= hour < end_hour:
+                filtered.append(slot)
+
+        elif start_hour:
+            if hour >= start_hour:
+                filtered.append(slot)
+
+    return filtered
+
+
+def clean_period_and_time_words(text):
     phrases_to_remove = [
         "зранку", "вранці", "ранок", "до обіду",
         "після обіду", "післяобід", "вдень", "день",
         "увечері", "ввечері", "вечером", "на вечір",
-        "вечір", "після роботи"
+        "вечір", "після роботи",
+        "після", "после", "з", "с", "до",
+        "дев’яти", "девяти", "девятої",
+        "десяти", "десятої",
+        "одинадцяти", "одинадцятої",
+        "дванадцяти", "дванадцятої",
+        "часу", "першої", "одної",
+        "двох", "другої",
+        "трьох", "третьої",
+        "чотирьох", "четвертої",
+        "п’яти", "пяти", "п’ятої", "пятої",
+        "шести", "шостої"
     ]
 
     for phrase in phrases_to_remove:
         text = text.replace(phrase, "")
 
-    return text.strip()
+    text = re.sub(r'\b[0-9]{1,2}\b', '', text)
+
+    return " ".join(text.split())
 
 
 def resolve_date_text(date_text):
@@ -111,12 +212,8 @@ def resolve_date_text(date_text):
     if not date_text:
         return None
 
-    original_text = date_text.lower().strip()
-
-    for symbol in [".", ",", "!", "?"]:
-        original_text = original_text.replace(symbol, "")
-
-    text = clean_period_words(original_text).strip()
+    text = normalize_text(date_text)
+    text = clean_period_and_time_words(text)
 
     if not text:
         return format_date(now)
@@ -310,6 +407,7 @@ def availability():
         date_text = request.args.get("date_text")
 
         time_period = extract_time_period(date_text)
+        start_hour, end_hour = extract_time_range(date_text)
 
         if date_text and not requested_date:
             requested_date = resolve_date_text(date_text)
@@ -330,6 +428,7 @@ def availability():
             )
 
             slots_for_date = filter_slots_by_period(slots_for_date, time_period)
+            slots_for_date = filter_slots_by_time_range(slots_for_date, start_hour, end_hour)
 
             busy_for_date = busy_by_date.get(requested_date, [])
 
@@ -339,6 +438,7 @@ def availability():
             if working_day and len(slots_for_date) == 0:
                 for date_key, slots in free_slots_by_date.items():
                     filtered_slots = filter_slots_by_period(slots, time_period)
+                    filtered_slots = filter_slots_by_time_range(filtered_slots, start_hour, end_hour)
 
                     if len(filtered_slots) > 0:
                         nearest_available_date = date_key
@@ -352,6 +452,8 @@ def availability():
                 "working_hours": "09:00-18:00",
                 "slot_duration_minutes": 60,
                 "time_period": time_period,
+                "start_hour": start_hour,
+                "end_hour": end_hour,
                 "is_working_day": working_day,
                 "available": working_day and len(slots_for_date) > 0,
                 "free_slots": slots_for_date[:3],
