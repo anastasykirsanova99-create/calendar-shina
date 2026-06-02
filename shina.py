@@ -44,6 +44,44 @@ def format_time(dt):
     return dt.strftime("%H:%M")
 
 
+def normalize_booking_date(date):
+    if not date:
+        return None
+
+    date = str(date).strip()
+
+    if re.fullmatch(r"\d{1,2}\.\d{1,2}\.\d{4}", date):
+        day, month, year = date.split(".")
+        return f"{int(day):02d}.{int(month):02d}.{year}"
+
+    if re.fullmatch(r"\d{1,2}\.\d{1,2}", date):
+        day, month = date.split(".")
+        now = datetime.now(KYIV_TZ)
+
+        candidate = datetime(
+            now.year,
+            int(month),
+            int(day),
+            0,
+            0,
+            tzinfo=KYIV_TZ
+        )
+
+        if candidate.date() < now.date():
+            candidate = datetime(
+                now.year + 1,
+                int(month),
+                int(day),
+                0,
+                0,
+                tzinfo=KYIV_TZ
+            )
+
+        return format_date(candidate)
+
+    return date
+
+
 def is_working_day(dt):
     return dt.weekday() < 5
 
@@ -508,8 +546,15 @@ def create_event():
         car_type = data.get('car_type')
         wheel_radius = data.get('wheel_radius')
         plate_number = data.get('plate_number')
-        date = data.get('date')
+        date = normalize_booking_date(data.get('date'))
         time = data.get('time')
+
+        if not date:
+            return jsonify({
+                "success": False,
+                "error": "date_required",
+                "message": "Дата запису обов’язкова"
+            }), 400
 
         start_dt = datetime.strptime(
             f"{date} {time}",
