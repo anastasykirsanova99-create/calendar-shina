@@ -205,8 +205,6 @@ def clean_period_and_time_words(text):
         text = text.replace(phrase, "")
 
     text = re.sub(r'\b[0-9]{1,2}\b', '', text)
-
-    # Важно: удаляем только отдельные предлоги, а не буквы внутри слов.
     text = re.sub(r'\b(з|с|до)\b', '', text)
 
     return " ".join(text.split())
@@ -218,8 +216,14 @@ def resolve_date_text(date_text):
     if not date_text:
         return None
 
-    text = normalize_text(date_text)
-    text = clean_period_and_time_words(text)
+    original_text = normalize_text(date_text)
+
+    is_next_week = (
+        "через тиждень" in original_text
+        or "через неделю" in original_text
+    )
+
+    text = clean_period_and_time_words(original_text)
 
     if not text:
         return format_date(now)
@@ -256,15 +260,14 @@ def resolve_date_text(date_text):
     if text in ["післязавтра", "послезавтра"]:
         return format_date(now + timedelta(days=2))
 
-    is_next = "наступ" in text or "следующ" in text
-
     words_to_remove = [
         "на", "у", "в", "цей", "цього", "цю",
         "будь", "ласка", "давайте", "хочу", "можна",
         "запишіть", "запис", "записатися",
         "наступний", "наступного", "наступну",
         "наступної", "наступна",
-        "следующий", "следующую", "следующего", "следующая"
+        "следующий", "следующую", "следующего", "следующая",
+        "через", "тиждень", "неделю"
     ]
 
     parts = text.split()
@@ -280,7 +283,7 @@ def resolve_date_text(date_text):
         if days_ahead == 0:
             days_ahead = 7
 
-        if is_next:
+        if is_next_week:
             days_ahead += 7
 
         return format_date(now + timedelta(days=days_ahead))
